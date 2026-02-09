@@ -391,7 +391,7 @@ const MasterTimetable: React.FC<MasterTimetableProps> = ({ state, setState }) =>
                         </select>
                      </div>
                    </>
-                 ) } slotFormData.entryType === 'lecture' && (
+                 )} {slotFormData.entryType === 'lecture' && (
                    <div className="space-y-3">
                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Select Faculty & Course</label>
                      <div className="space-y-2">
