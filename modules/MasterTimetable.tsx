@@ -72,25 +72,227 @@ const MasterTimetable: React.FC<MasterTimetableProps> = ({ state, setState }) =>
     }));
   };
 
-  const downloadSchedule = () => {
-    const data: any[] = [];
-    DAYS.forEach(day => {
-      filteredSections.forEach(sec => {
-        const row: any = { Day: day, Class: sec.name };
-        for (let i = 0; i < state.config.totalSlots; i++) {
-          const e = state.masterTimetable.find(e => e.sectionId === sec.id && e.day === day && e.slotIndex === i);
-          const sub = e?.subjectId ? state.subjects.find(s => s.id === e.subjectId) : null;
-          const fac = e?.facultyId ? state.faculty.find(f => f.id === e.facultyId) : null;
-          row[`Period ${i + 1}`] = e?.entryType === 'lunch' ? 'LUNCH' : (sub ? `${sub.code} (${fac?.name})` : (e?.title || '-'));
-        }
-        data.push(row);
-      });
-    });
-    const ws = XLSX.utils.json_to_sheet(data);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Weekly Schedule");
-    XLSX.writeFile(wb, `Weekly_Schedule_${currentSem?.name || 'Export'}.xlsx`);
+const downloadSchedule = () => {
+  const wb = XLSX.utils.book_new();
+
+  // ── Helper: shorten a full name to "First L." ──────────────────
+  const shortName = (fullName: string | undefined): string => {
+    if (!fullName) return '--';
+    const parts = fullName.trim().split(/\s+/);
+    if (parts.length === 1) return parts[0];
+    return `${parts[0]} ${parts[parts.length - 1][0]}.`;
   };
+
+  // ── Colour palette for subjects (index → ARGB hex) ─────────────
+  const SUBJECT_COLORS = [
+    'FFD9EAD3', 'FFCFE2F3', 'FFFFF2CC', 'FFFCE5CD',
+    'FFE8D5F5', 'FFFFE0E0', 'FFD0ECE8', 'FFFFD6EC',
+    'FFE2EFDA', 'FFD9D2E9', 'FFFFE599', 'FFB6D7A8',
+  ];
+  const LUNCH_COLOR   = 'FFFFF2CC'; // soft yellow
+  const HEADER_COLOR  = 'FF1F3864'; // dark navy
+  const DAY_COLOR     = 'FF2F5496'; // medium blue
+  const EMPTY_COLOR   = 'FFEFEFEF';
+
+  // Build subject → colour index map
+  const subjectColorMap: Record<string, string> = {};
+  let colorIdx = 0;
+  state.subjects.forEach(s => {
+    subjectColorMap[s.id] = SUBJECT_COLORS[colorIdx++ % SUBJECT_COLORS.length];
+  });
+
+  // One sheet per day
+  DAYS.forEach(day => {
+    const totalSlots = state.config.totalSlots;
+
+    // ── Build worksheet data array ─────────────────────────────────
+    // Row 0: Title row
+    // Row 1: Sub-header (Period numbers)
+    // Row 2+: one row per section
+
+    const ws: XLSX.WorkSheet = {};
+    const merges: XLSX.Range[] = [];
+
+    // Title row (row 1 in 1-based)
+    const titleCell = `A1`;
+    ws[titleCell] = {
+      v: `IMS Ghaziabad — ${currentSem?.name || ''} — ${day}`,
+      t: 's',
+    };
+    merges.push({ s: { r: 0, c: 0 }, e: { r: 0, c: totalSlots + 1 } });
+
+    // Header row (row 2): "Section" + period headers + "Class"
+    ws[XLSX.utils.encode_cell({ r: 1, c: 0 })] = { v: 'Section', t: 's' };
+    for (let i = 0; i < totalSlots; i++) {
+      ws[XLSX.utils.encode_cell({ r: 1, c: i + 1 })] = { v: `P${i + 1}`, t: 's' };
+    }
+
+    // Data rows
+    filteredSections.forEach((section, rowOffset) => {
+      const r = rowOffset + 2; // 0-based row index
+      const sem = state.semesters.find(s => s.id === section.semesterId);
+
+      // Section name cell
+      ws[XLSX.utils.encode_cell({ r, c: 0 })] = { v: section.name, t: 's' };
+
+      for (let slotIdx = 0; slotIdx < totalSlots; slotIdx++) {
+        const c = slotIdx + 1;
+        const cellAddr = XLSX.utils.encode_cell({ r, c });
+
+        const e = state.masterTimetable.find(
+          e => e.sectionId === section.id && e.day === day && e.slotIndex === slotIdx
+        );
+        const isLunch =
+          (sem?.lunchEnabled && sem?.lunchSlotIndex === slotIdx) ||
+          e?.entryType === 'lunch';
+
+        if (isLunch) {
+          ws[cellAddr] = { v: 'LUNCH', t: 's' };
+          continue;
+        }
+
+        if (e) {
+          const sub = e.subjectId ? state.subjects.find(s => s.id === e.subjectId) : null;
+          const fac = e.facultyId ? state.faculty.find(f => f.id === e.facultyId) : null;
+
+          if (e.entryType === 'lecture') {
+            ws[cellAddr] = {
+              v: sub ? `${sub.name}\n${shortName(fac?.name)}` : shortName(fac?.name),
+              t: 's',
+            };
+          } else {
+            ws[cellAddr] = {
+              v: e.title || e.entryType,
+              t: 's',
+            };
+          }
+        } else {
+          ws[cellAddr] = { v: '', t: 's' };
+        }
+      }
+    });
+
+    // ── Set sheet range ────────────────────────────────────────────
+    const totalRows = filteredSections.length + 2;
+    ws['!ref'] = XLSX.utils.encode_range({
+      s: { r: 0, c: 0 },
+      e: { r: totalRows - 1, c: totalSlots + 1 },
+    });
+    ws['!merges'] = merges;
+
+    // ── Column widths ──────────────────────────────────────────────
+    ws['!cols'] = [
+      { wch: 14 }, // Section column
+      ...Array(totalSlots).fill({ wch: 18 }),
+    ];
+
+    // ── Row heights ────────────────────────────────────────────────
+    ws['!rows'] = [
+      { hpt: 28 },  // Title
+      { hpt: 20 },  // Header
+      ...Array(filteredSections.length).fill({ hpt: 42 }),
+    ];
+
+    XLSX.utils.book_append_sheet(wb, ws, day.slice(0, 3));
+  });
+
+  // ── Apply styles via sheet_to_html trick is not available in SheetJS CE,
+  //    so we write a second pass using the raw cell objects approach ──
+  // SheetJS Community Edition supports cell styles via the !cols/!rows/s property
+  // on cells when used with xlsx-js-style. Since we're using standard xlsx,
+  // we instead produce a styled workbook by encoding styles into the cell `s` field
+  // (this works when the xlsx package has styles enabled, which it does in most
+  //  bundled environments via the full build).
+
+  // Re-iterate and attach styles
+  DAYS.forEach((day, dayIdx) => {
+    const wsName = day.slice(0, 3);
+    const ws = wb.Sheets[wsName];
+    if (!ws) return;
+    const totalSlots = state.config.totalSlots;
+
+    const styleCell = (addr: string, style: object) => {
+      if (ws[addr]) ws[addr].s = style;
+    };
+
+    const titleStyle = {
+      font: { bold: true, sz: 14, color: { rgb: 'FFFFFFFF' }, name: 'Arial' },
+      fill: { fgColor: { rgb: HEADER_COLOR } },
+      alignment: { horizontal: 'center', vertical: 'center', wrapText: true },
+    };
+    styleCell('A1', titleStyle);
+
+    const headerStyle = {
+      font: { bold: true, sz: 10, color: { rgb: 'FFFFFFFF' }, name: 'Arial' },
+      fill: { fgColor: { rgb: DAY_COLOR } },
+      alignment: { horizontal: 'center', vertical: 'center' },
+      border: {
+        top: { style: 'thin', color: { rgb: 'FFAAAAAA' } },
+        bottom: { style: 'thin', color: { rgb: 'FFAAAAAA' } },
+        left: { style: 'thin', color: { rgb: 'FFAAAAAA' } },
+        right: { style: 'thin', color: { rgb: 'FFAAAAAA' } },
+      },
+    };
+    // Section header
+    styleCell(XLSX.utils.encode_cell({ r: 1, c: 0 }), headerStyle);
+    for (let i = 0; i < totalSlots; i++) {
+      styleCell(XLSX.utils.encode_cell({ r: 1, c: i + 1 }), headerStyle);
+    }
+
+    filteredSections.forEach((section, rowOffset) => {
+      const r = rowOffset + 2;
+      const sem = state.semesters.find(s => s.id === section.semesterId);
+
+      // Section name
+      styleCell(XLSX.utils.encode_cell({ r, c: 0 }), {
+        font: { bold: true, sz: 9, name: 'Arial' },
+        fill: { fgColor: { rgb: 'FFD6DCE4' } },
+        alignment: { horizontal: 'center', vertical: 'center', wrapText: true },
+        border: {
+          top: { style: 'thin', color: { rgb: 'FFAAAAAA' } },
+          bottom: { style: 'thin', color: { rgb: 'FFAAAAAA' } },
+          left: { style: 'thin', color: { rgb: 'FFAAAAAA' } },
+          right: { style: 'thin', color: { rgb: 'FFAAAAAA' } },
+        },
+      });
+
+      for (let slotIdx = 0; slotIdx < totalSlots; slotIdx++) {
+        const c = slotIdx + 1;
+        const addr = XLSX.utils.encode_cell({ r, c });
+        const e = state.masterTimetable.find(
+          e => e.sectionId === section.id && e.day === day && e.slotIndex === slotIdx
+        );
+        const isLunch =
+          (sem?.lunchEnabled && sem?.lunchSlotIndex === slotIdx) ||
+          e?.entryType === 'lunch';
+
+        let bgColor = EMPTY_COLOR;
+        if (isLunch) bgColor = LUNCH_COLOR;
+        else if (e?.subjectId) bgColor = subjectColorMap[e.subjectId] || EMPTY_COLOR;
+        else if (e) bgColor = 'FFE8E8E8';
+
+        styleCell(addr, {
+          font: { sz: 9, name: 'Arial', bold: isLunch },
+          fill: { fgColor: { rgb: bgColor } },
+          alignment: {
+            horizontal: 'center',
+            vertical: 'center',
+            wrapText: true,
+            textRotation: isLunch ? 90 : 0,
+          },
+          border: {
+            top: { style: 'thin', color: { rgb: 'FFCCCCCC' } },
+            bottom: { style: 'thin', color: { rgb: 'FFCCCCCC' } },
+            left: { style: 'thin', color: { rgb: 'FFCCCCCC' } },
+            right: { style: 'thin', color: { rgb: 'FFCCCCCC' } },
+          },
+        });
+      }
+    });
+  });
+
+  XLSX.writeFile(wb, `IMS_Ghaziabad_Schedule_${currentSem?.name || 'Export'}.xlsx`);
+};
 
   const handleManualAdd = () => {
     if (!editingSlot) return;
