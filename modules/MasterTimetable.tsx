@@ -101,7 +101,7 @@ const downloadSchedule = () => {
         const sub = e?.subjectId ? state.subjects.find(s => s.id === e.subjectId) : null;
         const fac = e?.facultyId ? state.faculty.find(f => f.id === e.facultyId) : null;
         const isLunch = (sem?.lunchEnabled && sem?.lunchSlotIndex === i) || e?.entryType === 'lunch';
-        row[`Period ${i + 1}`] = isLunch ? 'LUNCH' : (sub ? `${sub.name}\n${shortName(fac?.name)}` : (e?.title || '-'));
+        row[`Period ${i + 1}`] = isLunch ? 'LUNCH' : (sub ? sub.name : (e?.title || '-'));
       }
       data.push(row);
     });
